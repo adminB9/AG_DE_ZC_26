@@ -1,44 +1,36 @@
-version: "3.9"
-
-volumes:
-  ny_taxi_postgres_data:
-    driver: local
-  pgadmin_data:
-    driver: local
-  kestra_postgres_data:
-    driver: local
-  kestra_data:
-    driver: local
-  kestra_tmp:
-    driver: local
-
 services:
   # -------------------------
   # Kestra + its Postgres
   # -------------------------
   kestra_postgres:
     image: postgres:18
-    volumes:
-      - kestra_postgres_data:/var/lib/postgresql
     environment:
       POSTGRES_DB: kestra
       POSTGRES_USER: kestra
       POSTGRES_PASSWORD: k3str4
+    volumes:
+      - kestra_postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -d $${POSTGRES_DB} -U $${POSTGRES_USER}"]
-      interval: 30s
-      timeout: 10s
-      retries: 10
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
 
   kestra:
     image: kestra/kestra:v1.1
-    pull_policy: always
     user: "root"
     command: server standalone
+    depends_on:
+      kestra_postgres:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "8081:8081"
     volumes:
       - kestra_data:/app/storage
-      - /var/run/docker.sock:/var/run/docker.sock
       - kestra_tmp:/tmp/kestra-wd
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       KESTRA_CONFIGURATION: |
         datasources:
@@ -51,7 +43,7 @@ services:
           server:
             basicAuth:
               username: "admin@kestra.io"
-              password: Admin1234!
+              password: "Admin1234!"
           repository:
             type: postgres
           storage:
@@ -63,69 +55,56 @@ services:
           tasks:
             tmpDir:
               path: /tmp/kestra-wd/tmp
+          # this is the URL you use in your browser
           url: http://localhost:8080/
-    ports:
-      - "8080:8080"
-      - "8081:8081"
-    depends_on:
-      kestra_postgres:
-        condition: service_started
+    restart: unless-stopped
 
   # -------------------------
   # NY Taxi Postgres + pgAdmin
   # -------------------------
   pgdatabase:
     image: postgres:18
-    container_name: pgdatabase
     environment:
       POSTGRES_USER: root
       POSTGRES_PASSWORD: root
       POSTGRES_DB: ny_taxi
-    volumes:
-      - ny_taxi_postgres_data:/var/lib/postgresql
     ports:
       - "5432:5432"
-    restart: unless-stopped
+    volumes:
+      - ny_taxi_postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U root -d ny_taxi"]
       interval: 3s
       timeout: 3s
       retries: 20
-    depends_on:
-      kestra:
-        condition: service_started
+    restart: unless-stopped
 
   pgadmin:
     image: dpage/pgadmin4
-    container_name: pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: root
       PGADMIN_CONFIG_PROXY_X_FOR_COUNT: 1
       PGADMIN_CONFIG_PROXY_X_HOST_COUNT: 1
       PGADMIN_CONFIG_PROXY_X_PREFIX_COUNT: 1
-    volumes:
-      - pgadmin_data:/var/lib/pgadmin
     ports:
       - "8085:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
     depends_on:
       pgdatabase:
         condition: service_healthy
     restart: unless-stopped
 
   # -------------------------
-  # Build-only image for loaders
+  # One-shot loaders (build the image here; no “taxi_ingest” service)
   # -------------------------
-  taxi_ingest:
+  zones_loader:
+    # profiles: ["load"]
+    image: taxi_ingest:v001
     build:
       context: .
       dockerfile: Dockerfile
-    image: taxi_ingest:v001
-    profiles: ["build-only"]
-
-  zones_loader:
-    image: taxi_ingest:v001
-    container_name: zones_loader
     depends_on:
       pgdatabase:
         condition: service_healthy
@@ -142,8 +121,11 @@ services:
     restart: "no"
 
   yellow_loader:
+    # profiles: ["load"]
     image: taxi_ingest:v001
-    container_name: yellow_loader
+    build:
+      context: .
+      dockerfile: Dockerfile
     depends_on:
       pgdatabase:
         condition: service_healthy
@@ -158,14 +140,13 @@ services:
       - "--pg-db=ny_taxi"
       - "--target-table=yellow_taxi"
       - "--chunksize=100000"
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "python -c \"from sqlalchemy import create_engine,text; e=create_engine('postgresql://root:root@pgdatabase:5432/ny_taxi'); c=e.connect().execute(text('select count(*) from public.yellow_taxi')).scalar(); raise SystemExit(0 if c and c>0 else 1)\""
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
-    restart: "no" 
+      # If your ingest script requires a URL, add it explicitly here:
+      # - "--url=https://.../yellow_tripdata_YYYY-MM.parquet"
+    restart: "no"
+
+volumes:
+  ny_taxi_postgres_data:
+  pgadmin_data:
+  kestra_postgres_data:
+  kestra_data:
+  kestra_tmp:
