@@ -1,3 +1,6 @@
+pipeline/keys/
+*.json
+
 *.parquet
 
 # Python
